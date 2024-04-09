@@ -1,20 +1,28 @@
 import './App.css';
 import { useRef, useState } from 'react';
+import './Api.js';
+import { uploadToS3 } from './Api.js';
 
 function App() {
-
+  const TEXT_FILE_TYPE = 'text/plain';
   const textInput = useRef();
   const [selectedFile, setSelectedFile] = useState(null);
 
   const handleFileChange = (event) => {
     const file = event.target.files[0];
     if (file) {
-      setSelectedFile(file);
+      if (file.type !== TEXT_FILE_TYPE) {
+        alert('Invalid file type. Please upload text file');
+      } else {
+        console.log(file);
+        setSelectedFile(file);
       }
+    }
   };
 
   const handleSubmit = async (event) => {
     // validate the form values inputs 
+    event.preventDefault();
     console.log(textInput);
     if (!textInput || !textInput.current.value){
       alert('Input text is required');
@@ -25,7 +33,7 @@ function App() {
       return;
     }
 
-
+    uploadToS3(selectedFile);
   };
 
   return (

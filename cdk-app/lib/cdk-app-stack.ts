@@ -36,8 +36,8 @@ export class CdkAppStack extends cdk.Stack {
     });
 
     // Lambda Function code in src directory
-    const functionCode = new lambda.AssetCode('src');
-    const lambdaFunction = new lambda.Function(this, 'InsertItem', {
+    const functionCode = new lambda.AssetCode('src/producer');
+    const InsertToDynamoDBFunction = new lambda.Function(this, 'InsertItem', {
       runtime: lambda.Runtime.NODEJS_18_X,
       code: functionCode,
       handler: 'index.handler',
@@ -48,43 +48,78 @@ export class CdkAppStack extends cdk.Stack {
     });
 
     // Add DynamoDB permissions to Lambda 
-    itemsTable.grantWriteData(lambdaFunction);
+    itemsTable.grantWriteData(InsertToDynamoDBFunction);
 
     //Gateway POST API
     const gatewayApi = new apigateway.RestApi(this, 'ExecuteFileEndpoint');
     const apiIntegration = new apigateway.AwsIntegration({
       proxy: true,
       service: 'lambda',
-      path: `2024-04-05/functions/${lambdaFunction.functionArn}/invocations`
+      path: `2015-03-31/functions/${InsertToDynamoDBFunction.functionArn}/invocations`
     });
 
     const root = gatewayApi.root.addResource('uploadFileApi');
     root.addMethod('POST', apiIntegration);
 
+    InsertToDynamoDBFunction.grantInvoke(new iam.ServicePrincipal('apigateway.amazonaws.com'));
     //Lambda Function for DynamoDB streams 
-    const dynamoDbStreamLambda = new lambda.Function(this, 'StreamLambda', {
+    const dynamoDbStreamConsumerFunction = new lambda.Function(this, 'StreamLambda', {
       runtime: lambda.Runtime.NODEJS_18_X,
-      code: functionCode,
+      code: new lambda.AssetCode('src/consumer'),
       handler: 'dynamoLambda.handler',
       timeout: cdk.Duration.seconds(90),
     });
 
     // Add DynamoDB Stream read permissions to Lambda
-    itemsTable.grantStreamRead(dynamoDbStreamLambda);
+    itemsTable.grantStreamRead(dynamoDbStreamConsumerFunction);
 
     // Add EC2 permissions to DynamoDb Lambda
-    dynamoDbStreamLambda.addToRolePolicy(new iam.PolicyStatement({
+    dynamoDbStreamConsumerFunction.addToRolePolicy(new iam.PolicyStatement({
       sid: 'LambdaEC2RunPolicy',
       resources: ['*'],
       actions: ['ec2:RunInstances'],
     }));
 
     //process stream records 
-    dynamoDbStreamLambda.addEventSource(new DynamoEventSource(itemsTable, {
+    dynamoDbStreamConsumerFunction.addEventSource(new DynamoEventSource(itemsTable, {
       startingPosition: lambda.StartingPosition.LATEST,
       batchSize: 1,
     }));
 
+    const role = new iam.Role(this, 'Ec2InstanceRole', {
+      assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com')  
+    });
+    
+    // Add S3 permissions(Only to the fileupload bucket) to EC2 Instance
+    role.addToPolicy(new iam.PolicyStatement({
+      actions: ['s3:ListBucket', 's3:GetObject', 's3:PutObject'], 
+      resources: [`arn:aws:s3:::${fileUploadBucket.bucketName}`, `arn:aws:s3:::${fileUploadBucket.bucketName}/*`]
+    }));
+    
+    // Add DynamoDB permissions (Only to the items Table) to EC2 Instance
+    role.addToPolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:Scan', 'dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:UpdateItem'],
+      resources: [itemsTable.tableArn] 
+    }));
+
+    role.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName('CloudWatchLogsFullAccess'));
+    
+    // Create instance profile and associate role
+    const instanceProfile = new iam.CfnInstanceProfile(this, 'Profile', {
+      roles: [role.roleName],
+      instanceProfileName: 'Ec2InstanceProfile'
+    });
+
+    //Attach PassRole permission to Comsumer Lambda 
+    dynamoDbStreamConsumerFunction.addToRolePolicy(new iam.PolicyStatement({
+      sid: 'LambdaIamPassRolePolicy',
+      resources: [role.roleArn],
+      actions: ['iam:PassRole'],
+      effect: iam.Effect.ALLOW,
+    }));
+
+    dynamoDbStreamConsumerFunction.addEnvironment('EC2_INSTANCE_PROFILE_NAME', instanceProfile.instanceProfileName as string);
+    dynamoDbStreamConsumerFunction.addEnvironment('DYNAMODB_TABLE_NAME', itemsTable.tableName);
     // Authorizer (Placeholder, needs configuration)
     // const authorizer = new apigateway.CfnAuthorizer(this, 'CognitoAuthorizer', {
     //   // Configure authorizer type and other properties
@@ -96,27 +131,6 @@ export class CdkAppStack extends cdk.Stack {
     //   authorizer: authorizer,
     // });
 
-    // S3 Bucket
-
-    // EC2 Instance (Placeholder)
-    // const vpc = new ec2.Vpc(this, 'MyVpc');
-    // const instance = new ec2.Instance(this, 'MyInstance', {
-    //   vpc,
-    //   // ... other instance properties
-    // });
-
-    // CDK Metadata (Example)
-    // new cdk.CfnTag(this, 'GroupTag', {
-    //   key: 'Label',
-    //   value: 'Group',
-    //   resourceArn: api.arn,
-    // });
-
-    // new cdk.CfnTag(this, 'Group2Tag', {
-    //   key: 'Label',
-    //   value: 'Group2',
-    //   // Resource can be instance.instanceArn if using EC2 Instance
-    // });
   }
 }
 

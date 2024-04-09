@@ -1,0 +1,12 @@
+{
+    
+"dependencies": {
+    
+
+    
+
+"@aws-sdk/client-ec2": "^3.549.0"
+    
+
+}
+}
