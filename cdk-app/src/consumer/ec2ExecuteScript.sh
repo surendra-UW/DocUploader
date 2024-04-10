@@ -61,7 +61,7 @@ updateExpressionValues="{\":s3path\":{\"S\":\"$output_file_path\"}}"
 # Update item in DynamoDB with new S3 path
 dynamodbUpdateResponse=$(aws dynamodb update-item \
   --table-name $table_name \
-  --key '{"id":{"S":"$key"}}' \
+  --key "$key_json" \
   --update-expression "SET output_file_path = :s3path" \
   --expression-attribute-values "$updateExpressionValues" )
 
