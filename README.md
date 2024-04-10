@@ -57,3 +57,9 @@ npm install -g @aws-amplify/cli <br>
 amplify init <br>
 amplify add hosting <br>
 amplify push <br>
+
+### NOTE
+Lambda function packages has to installed individually in their respective folders this is to reduce the package size <br>
+But, better approach would be to bundle the node_modules into LAmbda Layer and all 3 functions can share the Layer <br>
+Copying the logs to S3 is simplest solution but alternative could be installing cloud watch agent on the ec2 server and find the logs in cloud watch logs. 
+
