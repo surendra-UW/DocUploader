@@ -1,56 +1,91 @@
-import { AWS } from 'aws-sdk';
-import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { nanoid } from 'nanoid';
+import axios from 'axios';
 
 
-// AWS.config.region = 'us-east-2';
-
-// AWS.config.credentials = new AWS.CognitoIdentityCredentials({
-//     IdentityPoolId: ''});
- 
-const S3_FILE_UPLOAD_BUCKET_NAME='cdkappstack-filebucketcdfcd6de-xlrdgcslmadk';
-const AWS_REGION='us-east-2';
-console.log(process.env.AWS_REGION);
-const client = new S3Client({region: AWS_REGION});
+let generatedFileName='';
 
 const TEXT_FILE_EXTENSION = ".txt";
-const BUCKET_NAME = S3_FILE_UPLOAD_BUCKET_NAME;
-async function uploadToS3(file) {
+const BUCKET_NAME = process.env.REACT_APP_S3_FILE_UPLOAD_BUCKET_NAME;
+const API_GATEWAY_BASE_URL = process.env.REACT_APP_API_GATEWAY_BASE_URL;
+
+async function uploadToS3(token, file) {
     const regex = new RegExp(/\.[^/.]+$/)
     const fileName = file.name.replace(regex, "");
+    console.log(token);  
     //Using nanoid to generate a unique file name so that it wont overide existing files
-    const generatedFileName = fileName+nanoid(6)+TEXT_FILE_EXTENSION;
+    generatedFileName = process.env.REACT_APP_GENERATE_UNIQUE_FILENAME === 'false'?
+        fileName+TEXT_FILE_EXTENSION: fileName+nanoid(6)+TEXT_FILE_EXTENSION;
+    console.log(generatedFileName);
+    const body = {
+        bucketName: BUCKET_NAME,
+        fileName: generatedFileName,
+        fileType: 'text/plain',
+      };
+      
+    const headers = {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + token,
+        'Accept': 'application/json',
+    };
 
-    const command = new PutObjectCommand({
-        Bucket: BUCKET_NAME,
-        Key: generatedFileName,
-        Body: file,
-      });
+    const presignedURL = await axios.post(API_GATEWAY_BASE_URL+'getS3UploadUrl', body, {headers: headers})
+                                    .then(response => {
+                                        console.log(response);
+                                        if (response.status != 200) {
+                                            throw new Error('Failed to get presigned URL');
+                                        }  
+                                        return response.data.uploadURL;
+                                        // return axios.put(url, file, {headers: {'Content-Type': 'text/plain'}});
+                                    })
+                                    .catch((error) => {console.log(error);});
+    
+    if (!presignedURL) {
+        console.error('Failed to upload to S3');
+        alert('Failed to upload to S3');
+        return generatedFileName;
+    }
 
-    try {
-        const response = await client.send(command);
-        console.log(response);
-      } catch (err) {
-        console.error(err);
-      }
+    await axios.put(presignedURL, file, {headers: {'Content-Type': 'text/plain'}})
+    .then(response => {
+        if (response.status != 200) {
+            throw new Error('Failed to upload to S3');
+        } else{
+            alert('File uploaded successfully');
+        }
+    });
+    return generatedFileName;
 }
 
-function sendToApiGateway() {
-    const apiGateway = new AWS.ApiGatewayManagementApi({
-        apiVersion: '2018-11-29',
-        endpoint: ''
-    });
-    
+async function uploadMetadata(token, fileName, textInput) {
+    console.log('updating metadata');
+    const endPointUrl = API_GATEWAY_BASE_URL +'uploadFileMetadata';
+    const headers = {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + token,
+        'Accept': 'application/json',
+    };
     const apiGatewayPaylod = {
-    
+        "id": nanoid(),
+        "input_file_path": BUCKET_NAME+'/'+fileName,
+        "input_text": textInput
     };
     
-    const response = apiGateway.postToConnection(apiGatewayPaylod, function(err, data) {
-        if (err) console.log(err, err.stack);
-        else console.log(data);
-    });
+    console.log(apiGatewayPaylod);
+
+    const response = await axios.post(endPointUrl, apiGatewayPaylod, { headers: headers })
+                                .then((response) => {
+                                    console.log(response);
+                                    if (response.status === 200) {
+                                        alert('Metadata updated successfully');
+                                    } else{
+                                        console.log('Failed to update metadata');
+                                    }
+                                })
+                                .catch((error) => {
+                                    console.log(error);
+                                    return error;
+                                });
     return response;
 }
 
-
-export { uploadToS3, sendToApiGateway };
+export { uploadToS3, uploadMetadata };

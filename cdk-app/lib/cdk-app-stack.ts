@@ -3,11 +3,10 @@ import { Construct } from 'constructs';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
-import * as logs from 'aws-cdk-lib/aws-logs';
 import { DynamoEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as s3 from 'aws-cdk-lib/aws-s3';
-import * as ec2 from 'aws-cdk-lib/aws-ec2';
+import * as cognito from 'aws-cdk-lib/aws-cognito';
 
 const stackName = 'my-stack';
 
@@ -22,11 +21,27 @@ export class CdkAppStack extends cdk.Stack {
       encryption: s3.BucketEncryption.S3_MANAGED,
     });
 
+    fileUploadBucket.addCorsRule({
+      allowedOrigins: ['*'], 
+      allowedMethods: [s3.HttpMethods.PUT],
+      allowedHeaders: ['*'],
+    });
     //Output the bucket name created
     new cdk.CfnOutput(this, 'FileUploadBucketName', {
       value: fileUploadBucket.bucketName,
     })
 
+    // S3 File Upload Presigned URL Generator Lambda 
+    const presignedUrlGeneratorFunction = new lambda.Function(this, 'generateSignedUrlS3', {
+      runtime: lambda.Runtime.NODEJS_18_X,
+      code: new lambda.AssetCode('src/s3Uploader'),
+      handler: 'uploaderFunction.handler',
+      timeout: cdk.Duration.seconds(30),
+    });
+
+    // Add S3 permissions to Lambda
+    fileUploadBucket.grantReadWrite(presignedUrlGeneratorFunction);
+    
     // DynamoDB Table
     const itemsTable = new dynamodb.Table(this, 'FileTextTable', {
       partitionKey: { name: 'id', type: dynamodb.AttributeType.STRING },
@@ -37,7 +52,7 @@ export class CdkAppStack extends cdk.Stack {
 
     // Lambda Function code in src directory
     const functionCode = new lambda.AssetCode('src/producer');
-    const InsertToDynamoDBFunction = new lambda.Function(this, 'InsertItem', {
+    const insertToDynamoDBFunction = new lambda.Function(this, 'InsertItem', {
       runtime: lambda.Runtime.NODEJS_18_X,
       code: functionCode,
       handler: 'index.handler',
@@ -48,20 +63,88 @@ export class CdkAppStack extends cdk.Stack {
     });
 
     // Add DynamoDB permissions to Lambda 
-    itemsTable.grantWriteData(InsertToDynamoDBFunction);
+    itemsTable.grantWriteData(insertToDynamoDBFunction);
 
     //Gateway POST API
-    const gatewayApi = new apigateway.RestApi(this, 'ExecuteFileEndpoint');
-    const apiIntegration = new apigateway.AwsIntegration({
+    const gatewayApi = new apigateway.RestApi(this, 'DocumentUploaderApi');
+
+    const apiIntegrationS3 = new apigateway.AwsIntegration({
       proxy: true,
       service: 'lambda',
-      path: `2015-03-31/functions/${InsertToDynamoDBFunction.functionArn}/invocations`
+      path: `2015-03-31/functions/${presignedUrlGeneratorFunction.functionArn}/invocations`
     });
 
-    const root = gatewayApi.root.addResource('uploadFileApi');
-    root.addMethod('POST', apiIntegration);
+    const apiIntegrationDynamo = new apigateway.AwsIntegration({
+      proxy: true,
+      service: 'lambda',
+      path: `2015-03-31/functions/${insertToDynamoDBFunction.functionArn}/invocations`
+    });
 
-    InsertToDynamoDBFunction.grantInvoke(new iam.ServicePrincipal('apigateway.amazonaws.com'));
+    const s3UploadResource = gatewayApi.root.addResource('getS3UploadUrl');
+    const metadataUploadResource = gatewayApi.root.addResource('uploadFileMetadata');
+    const corsOptions = {
+      allowOrigins: apigateway.Cors.ALL_ORIGINS,
+      allowHeaders: apigateway.Cors.DEFAULT_HEADERS,
+      allowMethods: ['POST'],
+      allowCredentials: true,
+    };
+
+    s3UploadResource.addCorsPreflight(corsOptions); 
+    metadataUploadResource.addCorsPreflight(corsOptions);
+    // Create a Cognito user pool
+    const userPool = new cognito.UserPool(this, 'UserPool', {
+      selfSignUpEnabled: true,
+      signInAliases: {
+        email: true
+      },
+    });
+
+    const client = userPool.addClient('LocalAppClient', {
+      generateSecret: false,  
+      supportedIdentityProviders: [cognito.UserPoolClientIdentityProvider.COGNITO],
+      oAuth: {
+        flows: {
+          implicitCodeGrant :true
+        },
+        scopes: [cognito.OAuthScope.EMAIL, cognito.OAuthScope.OPENID],
+        callbackUrls: [`http://localhost:3000/`],
+        logoutUrls: [`http://localhost:3000/`],
+      },
+    })
+
+    userPool.addDomain('UserPoolDomain', {
+      cognitoDomain: {
+        domainPrefix: 'doc-uploader-service'
+      }
+    });
+    // Output the user pool id
+    new cdk.CfnOutput(this, 'UserPoolId', {
+      value: userPool.userPoolId
+    });
+
+    const authorizer = new apigateway.CfnAuthorizer(this, 'CognitoAuthorizer', {
+      type: 'COGNITO_USER_POOLS',
+      providerArns: [userPool.userPoolArn],
+      name: 'CognitoAuthorizer',
+      restApiId: gatewayApi.restApiId,
+      identitySource: 'method.request.header.Authorization'
+    });
+    
+    metadataUploadResource.addMethod('POST', apiIntegrationDynamo, {
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+      authorizer: {
+        authorizerId: authorizer.ref  
+      }
+    });
+
+    s3UploadResource.addMethod('POST', apiIntegrationS3, {
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+      authorizer: {
+        authorizerId: authorizer.ref  
+      }
+    });
+    presignedUrlGeneratorFunction.grantInvoke(new iam.ServicePrincipal('apigateway.amazonaws.com'));
+    insertToDynamoDBFunction.grantInvoke(new iam.ServicePrincipal('apigateway.amazonaws.com'));
     //Lambda Function for DynamoDB streams 
     const dynamoDbStreamConsumerFunction = new lambda.Function(this, 'StreamLambda', {
       runtime: lambda.Runtime.NODEJS_18_X,
@@ -120,16 +203,6 @@ export class CdkAppStack extends cdk.Stack {
 
     dynamoDbStreamConsumerFunction.addEnvironment('EC2_INSTANCE_PROFILE_NAME', instanceProfile.instanceProfileName as string);
     dynamoDbStreamConsumerFunction.addEnvironment('DYNAMODB_TABLE_NAME', itemsTable.tableName);
-    // Authorizer (Placeholder, needs configuration)
-    // const authorizer = new apigateway.CfnAuthorizer(this, 'CognitoAuthorizer', {
-    //   // Configure authorizer type and other properties
-    // });
-
-    // Define API Gateway authorizer association (if applicable)
-    // root.addMethod('POST', apiIntegration, {
-    //   authorizationType: apigateway.AuthorizationType.CUSTOM,
-    //   authorizer: authorizer,
-    // });
 
   }
 }
